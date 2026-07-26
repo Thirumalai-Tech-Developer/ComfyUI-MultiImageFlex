@@ -10,7 +10,7 @@ class FlexibleMultiImageUploader:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # Receives the JSON list of uploaded filenames from the UI
+                # Receives the JSON list of filenames from the UI list
                 "image_list_json": ("STRING", {"default": "[]", "multiline": True}),
                 "match_size_method": (["crop", "stretch", "pad"], {"default": "crop"}),
             }
@@ -32,7 +32,7 @@ class FlexibleMultiImageUploader:
             filenames = []
 
         if not filenames:
-            raise ValueError("No images uploaded yet. Click '📤 Upload Image' on the node.")
+            raise ValueError("No images in list. Click '📤 Upload Image(s)' on the node.")
 
         collected_tensors = []
 
@@ -52,21 +52,21 @@ class FlexibleMultiImageUploader:
             img = ImageOps.exif_transpose(img)
             img = img.convert("RGB")
 
-            # Convert to ComfyUI tensor: [1, H, W, 3]
+            # Convert to ComfyUI tensor format: [1, H, W, 3]
             tensor = torch.from_numpy(np.array(img).astype(np.float32) / 255.0).unsqueeze(0)
             collected_tensors.append(tensor)
 
         if not collected_tensors:
             raise ValueError("No valid images found in the upload list.")
 
-        # Baseline resolution set by the first uploaded image
+        # Baseline resolution set by the first image
         target_h = collected_tensors[0].shape[1]
         target_w = collected_tensors[0].shape[2]
         target_size = (target_w, target_h)
 
         processed_tensors = []
 
-        # Auto-resize mismatched dimensions so batch stacking succeeds
+        # Auto-resize mismatched images
         for tensor in collected_tensors:
             h, w = tensor.shape[1], tensor.shape[2]
             if (h, w) == (target_h, target_w):
@@ -85,7 +85,7 @@ class FlexibleMultiImageUploader:
                 resized_tensor = torch.from_numpy(np.array(pil_img).astype(np.float32) / 255.0).unsqueeze(0)
                 processed_tensors.append(resized_tensor)
 
-        # Combine into single [B, H, W, 3] batch
+        # Batch into single [B, H, W, 3] tensor
         batched_tensor = torch.cat(processed_tensors, dim=0)
 
         return (batched_tensor, len(processed_tensors))

@@ -5,9 +5,9 @@ app.registerExtension({
     name: "FlexibleMultiImageUploader.Extension",
     async nodeCreated(node) {
         if (node.comfyClass === "FlexibleMultiImageUploader") {
-            node.uploadedImages = []; // Array of { name, imgElement }
+            node.uploadedImages = []; // Array of { name, displayName, imgElement }
 
-            // Hide raw JSON text widget from UI
+            // Hide raw JSON widget from UI
             const jsonWidget = node.widgets?.find(w => w.name === "image_list_json");
             if (jsonWidget) {
                 jsonWidget.type = "hidden";
@@ -23,12 +23,10 @@ app.registerExtension({
 
             const updateNodeSize = () => {
                 const count = node.uploadedImages.length;
-                const cols = 2;
-                const rows = Math.ceil(count / cols) || 1;
-                const cellHeight = 90;
-                const baseHeight = 130;
-                node.size[0] = Math.max(node.size[0], 240);
-                node.size[1] = baseHeight + (rows * cellHeight);
+                const rowHeight = 52;
+                const baseHeight = 95;
+                node.size[0] = Math.max(node.size[0], 280);
+                node.size[1] = baseHeight + (count * rowHeight);
                 app.graph.setDirtyCanvas(true, true);
             };
 
@@ -56,7 +54,11 @@ app.registerExtension({
                             app.graph.setDirtyCanvas(true, true);
                         };
 
-                        node.uploadedImages.push({ name: fullPath, imgElement: img });
+                        node.uploadedImages.push({
+                            name: fullPath,
+                            displayName: filename,
+                            imgElement: img
+                        });
                         updateJsonWidget();
                         updateNodeSize();
                     }
@@ -65,12 +67,12 @@ app.registerExtension({
                 }
             };
 
-            // Single Upload Button (Appends to grid each time clicked)
-            node.addWidget("button", "📤 Upload Image", null, () => {
+            // Single Upload Button (supports picking 1 or multiple files)
+            node.addWidget("button", "📤 Upload Image(s)", null, () => {
                 const input = document.createElement("input");
                 input.type = "file";
                 input.accept = "image/*";
-                input.multiple = true;
+                input.multiple = true; // Multi-image support
                 input.onchange = async () => {
                     if (input.files && input.files.length > 0) {
                         for (const file of input.files) {
@@ -81,14 +83,38 @@ app.registerExtension({
                 input.click();
             });
 
-            // Clear Button to reset the grid
-            node.addWidget("button", "🗑️ Clear Grid", null, () => {
-                node.uploadedImages = [];
-                updateJsonWidget();
-                updateNodeSize();
-            });
+            // Handle clicking the ❌ remove button on individual list items
+            const origOnMouseDown = node.onMouseDown;
+            node.onMouseDown = function (e, pos, canvas) {
+                if (this.flags.collapsed) return origOnMouseDown?.apply(this, arguments);
 
-            // Render interactive Grid Preview on Canvas
+                const padding = 10;
+                const startY = 85;
+                const rowH = 48;
+                const gap = 4;
+                const btnW = 24;
+                const btnH = 24;
+
+                const count = this.uploadedImages ? this.uploadedImages.length : 0;
+
+                for (let i = 0; i < count; i++) {
+                    const y = startY + i * (rowH + gap);
+                    const btnX = this.size[0] - padding - btnW;
+                    const btnY = y + (rowH - btnH) / 2;
+
+                    // Check if click hits the remove button bounding box
+                    if (pos[0] >= btnX && pos[0] <= btnX + btnW && pos[1] >= btnY && pos[1] <= btnY + btnH) {
+                        this.uploadedImages.splice(i, 1); // Remove item
+                        updateJsonWidget();
+                        updateNodeSize();
+                        return true; // Click handled
+                    }
+                }
+
+                return origOnMouseDown?.apply(this, arguments);
+            };
+
+            // Render vertical list on canvas
             const origDrawForeground = node.onDrawForeground;
             node.onDrawForeground = function (ctx) {
                 if (origDrawForeground) origDrawForeground.apply(this, arguments);
@@ -99,53 +125,75 @@ app.registerExtension({
                     ctx.fillStyle = "#888";
                     ctx.font = "12px sans-serif";
                     ctx.textAlign = "center";
-                    ctx.fillText("No images uploaded yet", this.size[0] / 2, this.size[1] - 25);
+                    ctx.fillText("No images uploaded. Click above to add.", this.size[0] / 2, this.size[1] - 15);
                     return;
                 }
 
                 const padding = 10;
-                const startY = 100;
-                const cols = 2;
-                const gap = 8;
-                const gridW = this.size[0] - (padding * 2);
-                const cellW = (gridW - gap) / cols;
-                const cellH = cellW * 0.75;
+                const startY = 85;
+                const rowH = 48;
+                const gap = 4;
+                const thumbSize = 40;
 
                 this.uploadedImages.forEach((item, idx) => {
-                    const col = idx % cols;
-                    const row = Math.floor(idx / cols);
+                    const y = startY + idx * (rowH + gap);
+                    const rowW = this.size[0] - (padding * 2);
 
-                    const x = padding + col * (cellW + gap);
-                    const y = startY + row * (cellH + gap);
-
-                    // Thumbnail container box
-                    ctx.fillStyle = "#1a1a1a";
+                    // Row background bar
+                    ctx.fillStyle = "#1e1e1e";
                     ctx.strokeStyle = "#333";
                     ctx.lineWidth = 1;
                     ctx.beginPath();
-                    if (ctx.roundRect) ctx.roundRect(x, y, cellW, cellH, 6);
-                    else ctx.rect(x, y, cellW, cellH);
+                    if (ctx.roundRect) ctx.roundRect(padding, y, rowW, rowH, 6);
+                    else ctx.rect(padding, y, rowW, rowH);
                     ctx.fill();
                     ctx.stroke();
 
-                    // Render image thumbnail inside grid cell
+                    // Thumbnail image
+                    const thumbX = padding + 4;
+                    const thumbY = y + (rowH - thumbSize) / 2;
+
+                    ctx.fillStyle = "#111";
+                    ctx.fillRect(thumbX, thumbY, thumbSize, thumbSize);
+
                     if (item.imgElement && item.imgElement.complete && item.imgElement.naturalWidth > 0) {
                         ctx.save();
                         ctx.beginPath();
-                        if (ctx.roundRect) ctx.roundRect(x + 2, y + 2, cellW - 4, cellH - 4, 4);
-                        else ctx.rect(x + 2, y + 2, cellW - 4, cellH - 4);
+                        if (ctx.roundRect) ctx.roundRect(thumbX, thumbY, thumbSize, thumbSize, 4);
+                        else ctx.rect(thumbX, thumbY, thumbSize, thumbSize);
                         ctx.clip();
-                        ctx.drawImage(item.imgElement, x + 2, y + 2, cellW - 4, cellH - 4);
+                        ctx.drawImage(item.imgElement, thumbX, thumbY, thumbSize, thumbSize);
                         ctx.restore();
                     }
 
-                    // Index badge (1, 2, 3...)
-                    ctx.fillStyle = "rgba(0,0,0,0.75)";
-                    ctx.fillRect(x + 4, y + 4, 18, 18);
-                    ctx.fillStyle = "#fff";
-                    ctx.font = "bold 10px sans-serif";
+                    // Index + Filename text
+                    ctx.fillStyle = "#ddd";
+                    ctx.font = "11px sans-serif";
+                    ctx.textAlign = "left";
+                    
+                    let text = `${idx + 1}. ${item.displayName}`;
+                    const maxTextW = this.size[0] - padding * 2 - thumbSize - 45;
+                    if (ctx.measureText(text).width > maxTextW) {
+                        text = text.substring(0, 18) + "...";
+                    }
+                    ctx.fillText(text, thumbX + thumbSize + 8, y + (rowH / 2) + 4);
+
+                    // Individual Remove Button (❌)
+                    const btnW = 24;
+                    const btnH = 24;
+                    const btnX = this.size[0] - padding - btnW - 4;
+                    const btnY = y + (rowH - btnH) / 2;
+
+                    ctx.fillStyle = "#8d2525";
+                    ctx.beginPath();
+                    if (ctx.roundRect) ctx.roundRect(btnX, btnY, btnW, btnH, 4);
+                    else ctx.rect(btnX, btnY, btnW, btnH);
+                    ctx.fill();
+
+                    ctx.fillStyle = "#ffffff";
+                    ctx.font = "bold 12px sans-serif";
                     ctx.textAlign = "center";
-                    ctx.fillText(`${idx + 1}`, x + 13, y + 17);
+                    ctx.fillText("✕", btnX + (btnW / 2), btnY + (btnH / 2) + 4);
                 });
             };
         }
