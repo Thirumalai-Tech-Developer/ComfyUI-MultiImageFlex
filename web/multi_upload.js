@@ -5,12 +5,13 @@ app.registerExtension({
     name: "FlexibleMultiImageUploader.Extension",
     async nodeCreated(node) {
         if (node.comfyClass === "FlexibleMultiImageUploader") {
-            node.uploadedImages = []; // Array of { name, displayName, imgElement }
+            node.uploadedImages = [];
 
-            // Hide raw JSON widget from UI
+            // Completely disable rendering for the hidden JSON string widget
             const jsonWidget = node.widgets?.find(w => w.name === "image_list_json");
             if (jsonWidget) {
                 jsonWidget.type = "hidden";
+                jsonWidget.draw = function () {};
                 jsonWidget.computeSize = () => [0, -4];
             }
 
@@ -21,12 +22,25 @@ app.registerExtension({
                 }
             };
 
+            // Dynamically calculate where the custom list starts (below standard widgets)
+            const getListStartY = () => {
+                let lastY = 0;
+                if (node.widgets) {
+                    for (const w of node.widgets) {
+                        if (w.type !== "hidden" && w.last_y) {
+                            if (w.last_y > lastY) lastY = w.last_y;
+                        }
+                    }
+                }
+                return lastY > 0 ? lastY + 30 : 95;
+            };
+
             const updateNodeSize = () => {
                 const count = node.uploadedImages.length;
                 const rowHeight = 52;
-                const baseHeight = 95;
+                const startY = getListStartY();
                 node.size[0] = Math.max(node.size[0], 280);
-                node.size[1] = baseHeight + (count * rowHeight);
+                node.size[1] = startY + (count * rowHeight) + 25;
                 app.graph.setDirtyCanvas(true, true);
             };
 
@@ -67,12 +81,12 @@ app.registerExtension({
                 }
             };
 
-            // Single Upload Button (supports picking 1 or multiple files)
+            // Upload Button
             node.addWidget("button", "📤 Upload Image(s)", null, () => {
                 const input = document.createElement("input");
                 input.type = "file";
                 input.accept = "image/*";
-                input.multiple = true; // Multi-image support
+                input.multiple = true;
                 input.onchange = async () => {
                     if (input.files && input.files.length > 0) {
                         for (const file of input.files) {
@@ -83,13 +97,13 @@ app.registerExtension({
                 input.click();
             });
 
-            // Handle clicking the ❌ remove button on individual list items
+            // Handle individual ✕ remove button clicks
             const origOnMouseDown = node.onMouseDown;
             node.onMouseDown = function (e, pos, canvas) {
                 if (this.flags.collapsed) return origOnMouseDown?.apply(this, arguments);
 
                 const padding = 10;
-                const startY = 85;
+                const startY = getListStartY();
                 const rowH = 48;
                 const gap = 4;
                 const btnW = 24;
@@ -102,35 +116,35 @@ app.registerExtension({
                     const btnX = this.size[0] - padding - btnW;
                     const btnY = y + (rowH - btnH) / 2;
 
-                    // Check if click hits the remove button bounding box
                     if (pos[0] >= btnX && pos[0] <= btnX + btnW && pos[1] >= btnY && pos[1] <= btnY + btnH) {
-                        this.uploadedImages.splice(i, 1); // Remove item
+                        this.uploadedImages.splice(i, 1);
                         updateJsonWidget();
                         updateNodeSize();
-                        return true; // Click handled
+                        return true;
                     }
                 }
 
                 return origOnMouseDown?.apply(this, arguments);
             };
 
-            // Render vertical list on canvas
+            // Draw list dynamically below active widgets
             const origDrawForeground = node.onDrawForeground;
             node.onDrawForeground = function (ctx) {
                 if (origDrawForeground) origDrawForeground.apply(this, arguments);
                 if (this.flags.collapsed) return;
 
+                const startY = getListStartY();
                 const count = this.uploadedImages ? this.uploadedImages.length : 0;
+
                 if (count === 0) {
                     ctx.fillStyle = "#888";
                     ctx.font = "12px sans-serif";
                     ctx.textAlign = "center";
-                    ctx.fillText("No images uploaded. Click above to add.", this.size[0] / 2, this.size[1] - 15);
+                    ctx.fillText("No images uploaded. Click above to add.", this.size[0] / 2, startY + 20);
                     return;
                 }
 
                 const padding = 10;
-                const startY = 85;
                 const rowH = 48;
                 const gap = 4;
                 const thumbSize = 40;
@@ -139,7 +153,6 @@ app.registerExtension({
                     const y = startY + idx * (rowH + gap);
                     const rowW = this.size[0] - (padding * 2);
 
-                    // Row background bar
                     ctx.fillStyle = "#1e1e1e";
                     ctx.strokeStyle = "#333";
                     ctx.lineWidth = 1;
@@ -149,7 +162,6 @@ app.registerExtension({
                     ctx.fill();
                     ctx.stroke();
 
-                    // Thumbnail image
                     const thumbX = padding + 4;
                     const thumbY = y + (rowH - thumbSize) / 2;
 
@@ -166,7 +178,6 @@ app.registerExtension({
                         ctx.restore();
                     }
 
-                    // Index + Filename text
                     ctx.fillStyle = "#ddd";
                     ctx.font = "11px sans-serif";
                     ctx.textAlign = "left";
@@ -178,7 +189,6 @@ app.registerExtension({
                     }
                     ctx.fillText(text, thumbX + thumbSize + 8, y + (rowH / 2) + 4);
 
-                    // Individual Remove Button (❌)
                     const btnW = 24;
                     const btnH = 24;
                     const btnX = this.size[0] - padding - btnW - 4;
