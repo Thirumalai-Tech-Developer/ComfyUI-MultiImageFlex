@@ -7,19 +7,22 @@ import folder_paths
 class FlexibleMultiImageUploader:
     @classmethod
     def INPUT_TYPES(cls):
-        # Fetch existing files in ComfyUI's input directory
         input_dir = folder_paths.get_input_directory()
         files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))] if os.path.exists(input_dir) else []
-        
+        sorted_files = sorted(files)
+
+        # Pre-define optional upload slots
+        optional_inputs = {}
+        for i in range(2, 11):
+            optional_inputs[f"image_{i}"] = (sorted_files, {"image_upload": True})
+
         return {
             "required": {
-                # {"image_upload": True} triggers the native ComfyUI Upload Button widget!
-                "image": (sorted(files), {"image_upload": True}),
-                # Choose whether to pass only the selected image or all images in the upload folder
-                "load_mode": (["single_image", "all_in_folder"], {"default": "single_image"}),
-                # Auto-harmonize resolutions so PyTorch batching doesn't crash
+                # Primary upload slot with native ComfyUI Upload button
+                "image_1": (sorted_files, {"image_upload": True}),
                 "match_size_method": (["crop", "stretch", "pad"], {"default": "crop"}),
-            }
+            },
+            "optional": optional_inputs
         }
 
     RETURN_TYPES = ("IMAGE", "INT")
@@ -28,70 +31,93 @@ class FlexibleMultiImageUploader:
     CATEGORY = "image/upload"
 
     @classmethod
-    def IS_CHANGED(cls, image, load_mode, **kwargs):
-        """Ensures ComfyUI re-executes whenever a new file is uploaded."""
-        image_path = folder_paths.get_annotated_filepath(image)
-        if load_mode == "single_image":
-            return os.path.getmtime(image_path) if os.path.exists(image_path) else image
-        else:
-            parent_dir = os.path.dirname(image_path)
-            if os.path.exists(parent_dir):
-                return sum(os.path.getmtime(os.path.join(parent_dir, f)) 
-                           for f in os.listdir(parent_dir) 
-                           if os.path.isfile(os.path.join(parent_dir, f)))
-            return image
+    def IS_CHANGED(cls, **kwargs):
+        """Forces ComfyUI execution when uploaded files change."""
+        mtimes = []
+        for key, val in kwargs.items():
+            if isinstance(val, str) and val:
+                try:
+                    path = folder_paths.get_annotated_filepath(val)
+                    if os.path.exists(path):
+                        mtimes.append(os.path.getmtime(path))
+                except Exception:
+                    pass
+        return sum(mtimes) if mtimes else float("nan")
 
-    def process_images(self, image, load_mode, match_size_method):
-        image_path = folder_paths.get_annotated_filepath(image)
-        
-        if not os.path.exists(image_path):
-            raise ValueError(f"Uploaded image path does not exist: {image_path}")
+    def process_images(self, match_size_method="crop", **kwargs):
+        # Sort image inputs numerically (image_1, image_2, image_3...)
+        image_keys = sorted(
+            [k for k in kwargs.keys() if k.startswith("image_")],
+            key=lambda x: int(x.split("_")[1]) if x.split("_")[1].isdigit() else 999
+        )
 
-        valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-        files_to_process = []
+        collected_tensors = []
 
-        if load_mode == "single_image":
-            files_to_process = [image_path]
-        else:  # "all_in_folder" mode
-            parent_dir = os.path.dirname(image_path)
-            files_to_process = sorted([
-                os.path.join(parent_dir, f) for f in os.listdir(parent_dir)
-                if os.path.splitext(f)[1].lower() in valid_exts
-            ])
+        for key in image_keys:
+            val = kwargs[key]
+            if val is None or val == "":
+                continue
 
-        if not files_to_process:
-            raise ValueError("No valid images found to process.")
+            # Handle direct image tensor input [B, H, W, C]
+            if isinstance(val, torch.Tensor):
+                tensor = val
+                if tensor.ndim == 3:
+                    tensor = tensor.unsqueeze(0)
+                for b in range(tensor.shape[0]):
+                    collected_tensors.append(tensor[b:b+1])
 
-        image_tensors = []
-        target_size = None
+            # Handle uploaded filename from ComfyUI input directory
+            elif isinstance(val, str):
+                try:
+                    file_path = folder_paths.get_annotated_filepath(val)
+                except Exception:
+                    continue
 
-        for i, file_path in enumerate(files_to_process):
-            img = Image.open(file_path)
-            img = ImageOps.exif_transpose(img)  # Fix EXIF orientation
-            img = img.convert("RGB")
+                if not os.path.exists(file_path):
+                    continue
 
-            # Set baseline size from the first image
-            if i == 0:
-                target_size = img.size  # (width, height)
+                img = Image.open(file_path)
+                img = ImageOps.exif_transpose(img)
+                img = img.convert("RGB")
+
+                # Convert to standard ComfyUI float32 tensor [1, H, W, 3]
+                tensor = torch.from_numpy(np.array(img).astype(np.float32) / 255.0).unsqueeze(0)
+                collected_tensors.append(tensor)
+
+        if not collected_tensors:
+            raise ValueError("No images were uploaded or connected.")
+
+        # Establish baseline dimensions from first image
+        target_h = collected_tensors[0].shape[1]
+        target_w = collected_tensors[0].shape[2]
+        target_size = (target_w, target_h)
+
+        processed_tensors = []
+
+        # Auto-resize mismatched dimensions so batch tensor stacking doesn't crash
+        for tensor in collected_tensors:
+            h, w = tensor.shape[1], tensor.shape[2]
+            if (h, w) == (target_h, target_w):
+                processed_tensors.append(tensor)
             else:
-                if img.size != target_size:
-                    if match_size_method == "crop":
-                        img = ImageOps.fit(img, target_size, Image.Resampling.LANCZOS)
-                    elif match_size_method == "stretch":
-                        img = img.resize(target_size, Image.Resampling.LANCZOS)
-                    elif match_size_method == "pad":
-                        img = ImageOps.pad(img, target_size, color=(0, 0, 0))
+                arr = (tensor[0].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+                pil_img = Image.fromarray(arr)
 
-            # Convert to ComfyUI tensor: [1, H, W, 3] in 0.0 - 1.0 range
-            tensor = torch.from_numpy(np.array(img).astype(np.float32) / 255.0).unsqueeze(0)
-            image_tensors.append(tensor)
+                if match_size_method == "crop":
+                    pil_img = ImageOps.fit(pil_img, target_size, Image.Resampling.LANCZOS)
+                elif match_size_method == "stretch":
+                    pil_img = pil_img.resize(target_size, Image.Resampling.LANCZOS)
+                elif match_size_method == "pad":
+                    pil_img = ImageOps.pad(pil_img, target_size, color=(0, 0, 0))
 
-        # Combine into a single batch [B, H, W, 3]
-        batched_tensor = torch.cat(image_tensors, dim=0)
+                resized_tensor = torch.from_numpy(np.array(pil_img).astype(np.float32) / 255.0).unsqueeze(0)
+                processed_tensors.append(resized_tensor)
 
-        return (batched_tensor, len(image_tensors))
+        # Concatenate into single batch tensor [B, H, W, 3]
+        batched_tensor = torch.cat(processed_tensors, dim=0)
 
-# Node Registration
+        return (batched_tensor, len(processed_tensors))
+
 NODE_CLASS_MAPPINGS = {
     "FlexibleMultiImageUploader": FlexibleMultiImageUploader
 }
@@ -100,4 +126,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FlexibleMultiImageUploader": "📤 Flexible Multi-Image Uploader"
 }
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+WEB_DIRECTORY = "./web"
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
